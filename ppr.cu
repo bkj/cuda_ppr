@@ -20,8 +20,9 @@
 #include <queue>
 #include <limits>
 #include <vector>
+#include "nvToolsExt.h"
 
-#include "timer.hxx"
+#include "helpers.hxx"
 
 using namespace std;
 using namespace std::chrono;
@@ -39,6 +40,11 @@ Int* rindices;
 Int* cindices;
 Real* data;
 Real* degrees;
+
+Int* d_cindices;
+Int* d_rindices;
+Real* d_data;
+Real* d_degrees;
 
 Int n_seeds = 50;
 
@@ -72,22 +78,6 @@ void load_data(std::string inpath) {
     for(Int src = 0; src < n_nodes; src++) {
         degrees[src] = (Real)(indptr[src + 1] - indptr[src]);
     }
-}
-
-// --
-// Run
-
-long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
-    Real alpha   = 0.15;
-    Real epsilon = 1e-6;
-
-    // --
-    // Copy graph from host to device
-    
-    Int* d_cindices;
-    Int* d_rindices;
-    Real* d_data;
-    Real* d_degrees;
 
     cudaMalloc(&d_cindices,  n_edges       * sizeof(Int));
     cudaMalloc(&d_rindices,  n_edges       * sizeof(Int));
@@ -98,7 +88,24 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
     cudaMemcpy(d_rindices, rindices,  n_edges       * sizeof(Int),  cudaMemcpyHostToDevice);
     cudaMemcpy(d_data,     data,      n_edges       * sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_degrees,  degrees,   n_nodes       * sizeof(Real), cudaMemcpyHostToDevice);
-    
+}
+
+// --
+// Run
+
+void cuda_ppr(
+    Real* d_p, 
+    Int n_seeds, 
+    Int n_nodes, 
+    Int n_edges,
+    Int* d_cindices,
+    Int* d_rindices,
+    Real* d_data,
+    Real* d_degrees
+) {
+    Real alpha   = 0.15;
+    Real epsilon = 1e-6;
+
     // --
     // Setup problem on host
     
@@ -111,7 +118,7 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
     
     Real* r       = (Real*)malloc(k * sizeof(Real));
     Real* r_prime = (Real*)malloc(k * sizeof(Real));
-    for(Int i = 0; i < k; i++) p[i]       = 0;
+    // for(Int i = 0; i < k; i++) p[i]       = 0;
     for(Int i = 0; i < k; i++) r[i]       = 0;
     for(Int i = 0; i < k; i++) r_prime[i] = 0;
     
@@ -136,14 +143,11 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
     cudaMemcpy(d_frontier_in,  frontier_in,  k * sizeof(char), cudaMemcpyHostToDevice);
     cudaMemcpy(d_frontier_out, frontier_out, k * sizeof(char), cudaMemcpyHostToDevice);
     
-    Real* d_p;
     Real* d_r;    
     Real* d_r_prime;
-    cudaMalloc(&d_p,       k * sizeof(Real));
     cudaMalloc(&d_r,       k * sizeof(Real));
     cudaMalloc(&d_r_prime, k * sizeof(Real));
     
-    cudaMemcpy(d_p,       p,        k * sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_r,       r,        k * sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_r_prime, r_prime,  k * sizeof(Real), cudaMemcpyHostToDevice);
 
@@ -151,37 +155,35 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
     // Run
     
     cudaDeviceSynchronize();
-    auto t = high_resolution_clock::now();
     
     Real _2a1a = (2 * alpha) / (1 + alpha);
     Real _1a1a = ((1 - alpha) / (1 + alpha));
     
     // while(true) {
-    while(iteration < 32) {
+    while(iteration < 32) { // need to be careful about how many iterations we run
         
         int iteration1 = iteration + 1;
         
-        auto node_op = [=] __device__(int const& offset) -> void {
-            if(d_frontier_in[offset] != iteration) return;
-            d_p[offset] += _2a1a * d_r[offset];
-            d_r_prime[offset] = 0;
-        };
-        
-        thrust::for_each(
+        thrust::for_each_n(
             thrust::device,
             thrust::make_counting_iterator<int>(0),
-            thrust::make_counting_iterator<int>(n_seeds * n_nodes),
-            node_op
+            n_seeds * n_nodes,
+            [=] __device__(int const& noffset) {
+                d_r[noffset] = d_r_prime[noffset];
+                if(d_frontier_in[noffset] != iteration) return;
+                d_p[noffset] += _2a1a * d_r[noffset];
+                d_r_prime[noffset] = 0;
+            }
         );
 
-        auto edge_op = [=] __device__(int const& offset) -> void {
-            Int s    = offset / n_edges;
-            Int src  = d_rindices[offset % n_edges];
+        auto edge_op = [=] __device__(int const& eoffset) {
+            Int s    = eoffset / n_edges;
+            Int src  = d_rindices[eoffset % n_edges];
             Int _src = s * n_nodes + src;
             
             if(d_frontier_in[_src] != iteration) return;
             
-            Int dst  = d_cindices[offset % n_edges];
+            Int dst  = d_cindices[eoffset % n_edges];
             Int _dst = s * n_nodes + dst;
             
             Real update = _1a1a * d_r[_src] / d_degrees[src];
@@ -193,14 +195,12 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
                 d_frontier_out[_dst] = iteration1;
         };
 
-        thrust::for_each(
+        thrust::for_each_n(
             thrust::device,
             thrust::make_counting_iterator<int>(0),
-            thrust::make_counting_iterator<int>(n_seeds * n_edges), // could probably use a zip iterator here
+            n_seeds * n_edges,
             edge_op
         );
-        
-        cudaMemcpy(d_r, d_r_prime, k * sizeof(Real), cudaMemcpyDeviceToDevice);
         
         char* tmp      = d_frontier_in;
         d_frontier_in  = d_frontier_out;
@@ -208,12 +208,6 @@ long long cuda_ppr(Real* p, Int n_seeds, Int n_nodes, Int n_edges) {
         
         iteration++;
     }
-    
-    cudaMemcpy(p, d_p, k * sizeof(Real), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    
-    auto elapsed = high_resolution_clock::now() - t;
-    return duration_cast<microseconds>(elapsed).count();
 }
 
 
@@ -225,14 +219,36 @@ int main(int n_args, char** argument_array) {
         
     // ---------------- GPU IMPLEMENTATION -----------------
     
-    Real* gpu_p = (Real*)malloc(n_seeds * n_nodes * sizeof(Real));
-    auto gpu_time = cuda_ppr(gpu_p, n_seeds, n_nodes, n_edges);
+    Real* d_p; cudaMalloc(&d_p, n_seeds * n_nodes * sizeof(Real));
+    cudaDeviceSynchronize();
+    
+    cuda_timer_t timer;
+    timer.start();
+    
+    nvtxRangePushA("cuda_ppr");
+    cuda_ppr(
+        d_p, 
+        n_seeds, 
+        n_nodes, 
+        n_edges,
+        d_cindices,
+        d_rindices,
+        d_data,
+        d_degrees
+    );
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+    
+    long long gpu_time = timer.stop();
+    
+    Real* p = (Real*)malloc(n_seeds * n_nodes * sizeof(Real));
+    cudaMemcpy(p, d_p, n_seeds * n_nodes * sizeof(Real), cudaMemcpyDeviceToHost);
 
     // ---------------- VALIDATION -------------------------
         
-    for(Int seed = 0; seed < n_seeds; seed++) {
-        for(Int i = 0; i < n_nodes; i++) {
-            std::cout << gpu_p[seed * n_nodes + i] << " ";
+    for(Int i = 0; i < n_nodes; i++) {
+        for(Int seed = 0; seed < n_seeds; seed++) {
+            std::cout << std::setprecision(10) << p[seed * n_nodes + i] << " ";
         }
         std::cout << std::endl;
     }

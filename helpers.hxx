@@ -14,20 +14,18 @@ struct cuda_timer_t {
     cudaEventDestroy(stop_);
   }
 
-  // Alias of each other, start the timer.
-  void begin() { cudaEventRecord(start_); }
-  void start() { this->begin(); }
-
-  float end() {
+  void start() { cudaEventRecord(start_); }
+  
+  long long stop() {
     cudaEventRecord(stop_);
     cudaEventSynchronize(stop_);
     cudaEventElapsedTime(&time, start_, stop_);
-
-    return milliseconds();
+    return microseconds();
   }
-
-  float seconds() { return time * 1e-3; }
-  float milliseconds() { return time; }
+  
+  long long microseconds() { 
+    return (long long)(1000 * time);
+  }
 
  private:
   cudaEvent_t start_, stop_;

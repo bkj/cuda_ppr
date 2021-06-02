@@ -29,15 +29,15 @@ if __name__ == "__main__":
     print(f'reading {args.inpath}', file=sys.stderr)
     adj = mmread(args.inpath).tocsr()
     
-    print('permuting', file=sys.stderr)
-    p = np.random.permutation(adj.shape[0])
-    adj = adj[p][:,p]
-    adj.sort_indices()
+    # print('permuting', file=sys.stderr)
+    # p = np.random.permutation(adj.shape[0])
+    # adj = adj[p][:,p]
+    # adj.sort_indices()
     
-    print('perm        : ', p[:20],           file=sys.stderr)
-    print('adj.indptr  : ', adj.indptr[:20],  file=sys.stderr)
-    print('adj.indices : ', adj.indices[:20], file=sys.stderr)
-    print('adj.data    : ', adj.data[:20],    file=sys.stderr)
+    # print('perm        : ', p[:20],           file=sys.stderr)
+    # print('adj.indptr  : ', adj.indptr[:20],  file=sys.stderr)
+    # print('adj.indices : ', adj.indices[:20], file=sys.stderr)
+    # print('adj.data    : ', adj.data[:20],    file=sys.stderr)
     
     shape = np.array(adj.shape).astype(np.int32)
     nnz   = np.array([adj.nnz]).astype(np.int32)
